@@ -1,98 +1,98 @@
-#include "alt.h"
-#include "many.h"
-#include "map.h"
+#include "combinators.h"
 #include "parser.h"
-#include "ref.h"
-#include "seq.h"
-#include "skip.h"
+#include "primitives.h"
 
-#include <functional>
 #include <iostream>
 #include <numeric>
-#include <optional>
+#include <string>
 #include <tuple>
-#include <utility>
-#include <vector>
 
-constexpr auto char_parser(char c) {
-  return [c](parser_input_t input) -> parser_output_t<char> {
-    if (input.starts_with(c)) {
-      return std::make_pair(c, input.substr(1));
-    } else {
-      return std::nullopt;
-    }
-  };
+// char_ :: char -> Parser char
+constexpr auto char_(char c) {
+  return sat(item, [c](char d) { return c == d; });
 }
-constexpr auto whitespace_parser = char_parser(' ') | char_parser('\t') |
-                                   char_parser('\r') | char_parser('\n');
-constexpr auto digit_parser =
-    (char_parser('0') | char_parser('1') | char_parser('2') | char_parser('3') |
-     char_parser('4') | char_parser('5') | char_parser('6') | char_parser('7') |
-     char_parser('8') | char_parser('9')) >= [](char x) { return x - '0'; };
-constexpr auto number_parser = digit_parser >> *digit_parser >=
-                               [](std::tuple<int, std::vector<int>> const &x) {
-                                 auto &&[first, rest] = x;
-                                 return std::accumulate(rest.begin(),
-                                                        rest.end(), first,
-                                                        [](int acc, int x) {
-                                                          return acc * 10 + x;
-                                                        });
-                               };
+
+// digit_ :: Parser char
+constexpr auto digit_ = sat(item, [](char c) { return '0' <= c && c <= '9'; });
+
+// to_int :: char -> int
+constexpr auto to_int(char c) -> int { return c - '0'; }
+
+// number_ :: Parser int
+inline auto const number_ = map(
+    [](auto xs) -> int {
+      return std::transform_reduce(
+          xs.begin(), xs.end(), 0,
+          [](auto acc, auto x) -> int { return acc * 10 + x; }, to_int);
+    },
+    +digit_);
+
+// whitespace_ :: Parser [char]
+inline auto const whitespace_ = many(sat(item, std::isspace));
+
+// parse :: Parser a -> Parser a
+inline auto const parse = make_parse(whitespace_);
+
+// token :: Parser a -> Parser a
+inline auto const token = make_token(whitespace_);
+
+extern parser_t<int> expr;
+extern parser_t<int> factor;
+extern parser_t<int> term;
+
+inline parser_t<int> expr = token(map(
+    [](auto x) {
+      auto [y, ys] = x;
+      return std::reduce(ys.begin(), ys.end(), y, [](auto acc, auto x) {
+        auto [op, y] = x;
+        if (op == '+') {
+          return acc + y;
+        } else {
+          return acc - y;
+        }
+      });
+    },
+    [](parser_input_t input) {
+      static auto p = factor >> *(token(char_('+') || char_('-')) >> factor);
+      return p(input);
+    }));
+inline parser_t<int> factor = token(map(
+    [](auto x) {
+      auto [y, ys] = x;
+      return std::reduce(ys.begin(), ys.end(), y, [](auto acc, auto x) {
+        auto [op, y] = x;
+        if (op == '*') {
+          return acc * y;
+        } else {
+          return acc / y;
+        }
+      });
+    },
+    [](parser_input_t input) {
+      static auto p = term >> *(token(char_('*') || char_('/')) >> term);
+      return p(input);
+    }));
+inline parser_t<int> term = token(map(
+    [](auto x) {
+      if (x.index() == 0) {
+        return std::get<0>(x);
+      } else if (x.index() == 1) {
+        auto [i, y, j] = std::get<1>(x);
+        return y;
+      } else {
+        auto [i, y] = std::get<2>(x);
+        return -y;
+      }
+    },
+    [](parser_input_t input) {
+      static auto p = number_ ||
+                      (token(char_('(')) >> expr >> token(char_(')'))) ||
+                      (token(char_('-')) >> term);
+      return p(input);
+    }));
 
 int main() {
-
-  std::function<parser_output_t<int>(parser_input_t)> expr_parser;
-  std::function<parser_output_t<int>(parser_input_t)> term_parser;
-  std::function<parser_output_t<int>(parser_input_t)> factor_parser;
-
-  auto sw = skip(whitespace_parser);
-  expr_parser =
-      sw(ref(term_parser)) >>
-      *(sw(char_parser('+') | char_parser('-')) >> sw(ref(term_parser))) >=
-      [](std::tuple<int, std::vector<std::tuple<char, int>>> const &x) {
-        auto value = std::get<0>(x);
-        for (auto &&rhs : std::get<1>(x)) {
-          switch (std::get<0>(rhs)) {
-          case '+':
-            value = value + std::get<1>(rhs);
-            break;
-          case '-':
-            value = value - std::get<1>(rhs);
-            break;
-          }
-        }
-        return value;
-      };
-  term_parser =
-      sw(ref(factor_parser)) >>
-      *(sw(char_parser('*') | char_parser('/')) >> sw(ref(factor_parser))) >=
-      [](std::tuple<int, std::vector<std::tuple<char, int>>> const &x) {
-        auto value = std::get<0>(x);
-        for (auto &&rhs : std::get<1>(x)) {
-          switch (std::get<0>(rhs)) {
-          case '*':
-            value = value * std::get<1>(rhs);
-            break;
-          case '/':
-            value = value / std::get<1>(rhs);
-            break;
-          }
-        }
-        return value;
-      };
-  factor_parser =
-      sw(number_parser) |
-      (sw(char_parser('(')) >> sw(ref(expr_parser)) >> sw(char_parser(')'))) >=
-          [](std::variant<int, std::tuple<char, int, char>> const &x) {
-            if (std::holds_alternative<int>(x)) {
-              return std::get<0>(x);
-            } else {
-              auto [lbracket, value, rbracket] = std::get<1>(x);
-              return value;
-            }
-          };
-
-  auto i = expr_parser("5*(3   +  \n5)");
+  auto i = parse(expr)("  -( -5 + --10  ) * -3 ");
   if (i) {
     std::cout << i->first << std::endl;
   }
